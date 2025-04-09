@@ -58,16 +58,6 @@ def create_test_config(test_home, db_path, enable_expiration=False):
         'enable_expiration_dates': str(enable_expiration).lower()
     }
     
-    config['email'] = {
-        'to_address': 'test@example.com',
-        'from_address': 'ssh-key-cop@example.com',
-        'smtp_server': 'localhost',
-        'smtp_port': '25',
-        'smtp_username': '',
-        'smtp_password': '',
-        'use_tls': 'false'
-    }
-    
     with open(config_path, 'w') as f:
         config.write(f)
     

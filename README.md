@@ -4,80 +4,91 @@ A utility to monitor and enforce SSH key rotation policies.
 
 ## Description
 
-SSH Key Cop checks user's authorized_keys files to enforce key rotation policies. It identifies SSH keys that have been in use longer than a specified threshold (e.g. 30 days) and reports violations via email. It can also automatically add expiration dates to SSH keys in the authorized_keys file to enforce key rotation at the SSH level.
+SSH Key Cop checks user's authorized_keys files to enforce key rotation policies. It identifies SSH keys that have been in use longer than a specified threshold (e.g. 30 days) and logs violations. It can also automatically add expiration dates to SSH keys in the authorized_keys file to enforce key rotation at the SSH level.
 
 ## Features
 
 - Scans all user home directories for authorized_keys files
 - Tracks SSH key usage with an SQLite database
-- Reports keys that exceed the age threshold
-- Configurable email notifications for violations
+- Reports keys that exceed the age threshold via logging
+- Configurable key rotation policies
 - External configuration file in INI format
 - Dry-run mode for testing
 - Database dump option to view all tracked keys
 - Automatic expiration date management for SSH keys
-- Enforces key rotation at both application and SSH levels
+- Enforces key rotation by setting key expiration dates
+- Tamper proof, will detect and correct any attempts by the user to remove or change the expiration date.
 
 ## Requirements
 
-- Python 3.12 or higher
+- Python 3.9 or higher
 - No third-party dependencies (standard library only)
+- Root or sudo access (required for accessing user home directories)
+- Cron (for scheduled execution)
 
 ## Installation
 
-Simply clone this repository:
+1. Clone this repository to a system directory:
 
 ```bash
-git clone https://github.com/robert-mcdermott/ssh-key-cop.git
-cd ssh-key-cop
+sudo mkdir -p /opt/ssh-key-cop
+sudo git clone https://github.com/robert-mcdermott/ssh-key-cop.git /opt/ssh-key-cop
+cd /opt/ssh-key-cop
 ```
 
-Make the script executable:
+2. Make the script executable:
 
 ```bash
-chmod +x ssh_key_cop.py
+sudo chmod +x ssh_key_cop.py
+```
+
+3. Set up the configuration:
+
+```bash
+sudo cp ssh_key_cop.ini.sample /etc/ssh_key_cop.ini
+sudo chmod 600 /etc/ssh_key_cop.ini
+```
+
+4. Create the database directory:
+
+```bash
+sudo mkdir -p /var/lib/ssh-key-cop
+sudo chmod 700 /var/lib/ssh-key-cop
+```
+
+5. Set up the cron job:
+
+```bash
+sudo crontab -e
+```
+
+Add the following line to run the script daily at 1 AM:
+
+```
+0 1 * * * /opt/ssh-key-cop/ssh_key_cop.py --config /etc/ssh_key_cop.ini
 ```
 
 ## Configuration
 
-SSH Key Cop uses an INI configuration file to store settings. A sample configuration file is provided (`ssh_key_cop.ini.sample`). Copy this file to `ssh_key_cop.ini` and edit as needed:
-
-```bash
-cp ssh_key_cop.ini.sample ssh_key_cop.ini
-```
+SSH Key Cop uses an INI configuration file to store settings. The configuration file should be placed at `/etc/ssh_key_cop.ini` and should be readable only by root.
 
 ### Configuration Options
 
 The configuration file contains these sections:
 
 #### [database]
-- `path`: Path to the SQLite database file
+- `path`: Path to the SQLite database file (e.g., `/var/lib/ssh-key-cop/ssh_key_cop.db`)
 
 #### [keys]
 - `expiration_days`: Number of days before a key is considered expired
 - `enable_expiration_dates`: Whether to add expiration dates to authorized_keys files (true/false)
 
-#### [email]
-- `to_address`: Email recipient for violation reports
-- `from_address`: Email sender address
-- `smtp_server`: SMTP server hostname or IP
-- `smtp_port`: SMTP server port
-- `smtp_username`: Username for SMTP authentication (optional)
-- `smtp_password`: Password for SMTP authentication (optional)
-- `use_tls`: Whether to use TLS for SMTP connection
-
 ## Usage
 
-Run the utility:
+The script is designed to be run as a scheduled task via cron. However, you can also run it manually:
 
 ```bash
-./ssh_key_cop.py
-```
-
-Or using `uv run`:
-
-```bash
-uv run ssh_key_cop.py
+sudo /opt/ssh-key-cop/ssh_key_cop.py --config /etc/ssh_key_cop.ini
 ```
 
 ### Command-line Options
@@ -91,35 +102,29 @@ optional arguments:
   -h, --help            show this help message and exit
   -c CONFIG, --config CONFIG
                         Path to the configuration file
-  --dry-run             Run without modifying the database or sending emails
+  --dry-run             Run without modifying the database
   --dump                Dump the contents of the database and exit
   -v, --verbose         Enable verbose output
 ```
 
 ### Examples
 
-Check for violations and send email reports:
+Iventory keys, set expiration dates, detect/correct tampering:
 
 ```bash
-uv run ssh_key_cop.py
+sudo /opt/ssh-key-cop/ssh_key_cop.py
 ```
 
 Display all tracked keys in the database:
 
 ```bash
-uv run ssh_key_cop.py --dump
+sudo /opt/ssh-key-cop/ssh_key_cop.py --dump
 ```
 
-Run in dry-run mode (no database changes or emails):
+Run in dry-run mode (no database changes):
 
 ```bash
-uv run ssh_key_cop.py --dry-run
-```
-
-Use a specific configuration file:
-
-```bash
-uv run ssh_key_cop.py --config /path/to/custom/config.ini
+sudo /opt/ssh-key-cop/ssh_key_cop.py --dry-run
 ```
 
 ## Expiration Date Management
@@ -134,19 +139,64 @@ When `enable_expiration_dates` is set to `true` in the configuration, SSH Key Co
 
 The expiration date format is `YYYYMMDDHHMM` (e.g., "202504101116" for April 10, 2025, 11:16 AM).
 
-## Running as a Scheduled Task
+## Logging
 
-To set up as a cron job for regularly monitoring keys, add something like:
+SSH Key Cop supports two logging destinations:
 
+1. Console (stdout) - Always enabled
+2. File - Optional, configured in the config file
+
+### Logging Configuration
+
+The logging section in the configuration file supports this option:
+
+#### [logging]
+- `file`: Path to log file (e.g., `/var/log/ssh-key-cop.log`)
+
+Example configuration:
+```ini
+[logging]
+file = /var/log/ssh-key-cop.log
 ```
-# Run SSH Key Cop daily at 1 AM
-0 1 * * * cd /path/to/ssh-key-cop && uv run ssh_key_cop.py --config /etc/ssh_key_cop.ini
+
+### Log File Rotation
+
+When using file logging, logs are automatically rotated:
+- Maximum file size: 10MB
+- Number of backup files: 5
+- Backup files are named with .1, .2, etc. suffixes
+
+### Log Levels
+
+- INFO: Normal operation messages
+- WARNING: Key violations and potential issues
+- ERROR: Critical errors that need attention
+- DEBUG: Detailed information (enabled with --verbose flag)
+
+Example log entries:
+```
+WARNING: Found 2 key violations
+WARNING: Key violation: user1's key is 45 days old (first seen: 2024-02-01T12:00:00)
+WARNING: Key violation: user2's key is 60 days old (first seen: 2024-01-15T08:30:00)
 ```
 
-## Future Enhancements
+### Viewing Logs
 
-- Automatically remove expired keys from authorized_keys files
-- Extended reporting and statistics
-- Web interface for easy monitoring
-- Support for different expiration date formats
-- Key rotation automation
+Depending on your configuration, logs can be viewed in different ways:
+
+1. Console output (always available)
+2. Log file (if configured):
+   ```bash
+   sudo tail -f /var/log/ssh-key-cop.log
+   ```
+
+## Security Considerations
+
+1. The script needs to access and modify files located in user's home directories, this means it will need to run with `root` or `sudo` rights for function correctly.
+2. The script and its configuration files should be owned by root and not writable by other users
+3. The database file should be readable only by root
+4. Consider using SELinux or AppArmor to restrict the script's access to only necessary directories
+5. Monitor the logs for any unauthorized access attempts
+6. Regular security audits should be performed on the script and its configuration
+
+

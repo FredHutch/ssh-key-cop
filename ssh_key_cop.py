@@ -11,12 +11,11 @@ import configparser
 import datetime
 import glob
 import logging
+import logging.handlers
 import os
 import re
-import smtplib
 import sqlite3
 import sys
-from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -30,11 +29,8 @@ class SSHKeyCop:
 
         Args:
             config_path: Path to the configuration file.
-            dry_run: If True, don't send emails or update the database.
+            dry_run: If True, don't update the database.
         """
-        # Set up logging first
-        self.setup_logging()
-        
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
             
@@ -44,35 +40,58 @@ class SSHKeyCop:
         self.db_path = self.config.get('database', 'path')
         self.days_threshold = self.config.getint('keys', 'expiration_days')
         self.enable_expiration_dates = self.config.getboolean('keys', 'enable_expiration_dates', fallback=False)
-        self.logger.info(f"Expiration dates enabled: {self.enable_expiration_dates}")
-        self.email_to = self.config.get('email', 'to_address')
-        self.email_from = self.config.get('email', 'from_address')
-        self.smtp_server = self.config.get('email', 'smtp_server')
-        self.smtp_port = self.config.getint('email', 'smtp_port')
-        self.smtp_username = self.config.get('email', 'smtp_username', fallback=None)
-        self.smtp_password = self.config.get('email', 'smtp_password', fallback=None)
-        self.smtp_use_tls = self.config.getboolean('email', 'use_tls', fallback=False)
         
-        # If username or password are empty strings, set them to None
-        if not self.smtp_username:
-            self.smtp_username = None
-        if not self.smtp_password:
-            self.smtp_password = None
-            
         self.dry_run = dry_run
         self.conn = None
         self.cursor = None
+        
+        # Set up logging after config is loaded
+        self.setup_logging()
+        self.logger.info(f"Expiration dates enabled: {self.enable_expiration_dates}")
+        
         self.setup_database()
 
     def setup_logging(self):
         """Set up logging configuration."""
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            handlers=[logging.StreamHandler()]
-        )
+        # Create logger
         self.logger = logging.getLogger("ssh-key-cop")
-
+        self.logger.setLevel(logging.INFO)
+        
+        # Create formatter
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        
+        # Add handlers based on configuration
+        handlers = []
+        
+        # Always add console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        handlers.append(console_handler)
+        
+        # Check for log file configuration
+        if self.config.has_option('logging', 'file'):
+            log_file = self.config.get('logging', 'file')
+            try:
+                file_handler = logging.handlers.RotatingFileHandler(
+                    log_file,
+                    maxBytes=10*1024*1024,  # 10MB
+                    backupCount=5
+                )
+                file_handler.setFormatter(formatter)
+                handlers.append(file_handler)
+            except Exception as e:
+                print(f"Error setting up file logging: {e}", file=sys.stderr)
+        
+        # Remove any existing handlers
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+        
+        # Add all configured handlers
+        for handler in handlers:
+            self.logger.addHandler(handler)
+        
     def setup_database(self):
         """Connect to the database and create tables if they don't exist."""
         self.conn = sqlite3.connect(self.db_path)
@@ -232,66 +251,6 @@ class SSHKeyCop:
         except sqlite3.Error as e:
             self.logger.error(f"Database error retrieving key info: {e}")
             return None
-
-    def send_violation_email(self, violations: List[Dict]) -> None:
-        """
-        Send email about key violations.
-        
-        Args:
-            violations: List of dictionaries with violation information
-        """
-        if not violations:
-            return
-            
-        if self.dry_run:
-            self.logger.info(f"[DRY RUN] Would send email with {len(violations)} violations")
-            return
-            
-        try:
-            msg = EmailMessage()
-            msg['Subject'] = 'SSH Key Rotation Violations'
-            msg['From'] = self.email_from
-            msg['To'] = self.email_to
-            
-            body = "The following SSH keys have not been rotated in over " \
-                  f"{self.days_threshold} days:\n\n"
-                  
-            for v in violations:
-                body += f"User: {v['username']}\n"
-                body += f"Key: {v['key_signature']}\n"
-                body += f"First seen: {v['first_seen_date']}\n"
-                body += f"Age: {v['days_old']} days\n\n"
-                
-            body += "\nPlease ensure these keys are rotated as soon as possible."
-            
-            msg.set_content(body)
-            
-            # Send email using configured SMTP server
-            try:
-                if self.smtp_username and self.smtp_password:
-                    # Use authentication
-                    if self.smtp_use_tls:
-                        with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                            server.starttls()
-                            server.login(self.smtp_username, self.smtp_password)
-                            server.send_message(msg)
-                    else:
-                        with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                            server.login(self.smtp_username, self.smtp_password)
-                            server.send_message(msg)
-                else:
-                    # No authentication needed
-                    with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                        server.send_message(msg)
-                
-                self.logger.info(f"Sent violation report to {self.email_to}")
-            except Exception as e:
-                self.logger.error(f"Failed to send email: {e}")
-                # Still log the email content
-                self.logger.info(f"Email content that would have been sent: {body}")
-                
-        except Exception as e:
-            self.logger.error(f"Error preparing email: {e}")
 
     def update_authorized_keys(self, username: str, key_signatures: List[Tuple[str, Optional[str]]]) -> None:
         """
@@ -480,7 +439,11 @@ class SSHKeyCop:
         
         if violations:
             self.logger.warning(f"Found {len(violations)} key violations")
-            self.send_violation_email(violations)
+            for violation in violations:
+                self.logger.warning(
+                    f"Key violation: {violation['username']}'s key is {violation['days_old']} days old "
+                    f"(first seen: {violation['first_seen_date']})"
+                )
         else:
             self.logger.info("No key violations found")
 

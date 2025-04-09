@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 import subprocess
 import importlib.util
+import re
 
 # Sample authorized_keys entries for testing
 SAMPLE_KEYS = [
@@ -30,8 +31,20 @@ SAMPLE_KEYS = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBTZSt5IZWZaGEJt8l5CI4DijXPr78L7HHEfB3SJlzFZ test-user3@example.com"
 ]
 
+# Sample keys with expiration dates
+SAMPLE_KEYS_WITH_EXPIRATION = [
+    # Key with correct expiration date
+    "expiry-time=202403151200 ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAIEA6vRl3UcgQmEoPJB4MHWYaf+9fiGwSABQDh4tYGKYP+31w9Sj5BU8EyoReFF3+P5+7dFy+jtLG8j6ZHCWMS4ugtZsZE3R0AuIYUHifOH3KQEvxWNmRNR6yYfVSPNNkIoDIwfWcbfHsxpHcD2Fjf5jygirGkkh0/KHHrVdAyER10k= test-user1@example.com",
+    
+    # Key with incorrect expiration date
+    "expiry-time=202403151200 ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAIEAn3BWdpK5zX/8MVx724esiTXR49QzLdy5u5AoKTGFL7gbpH5NxTARHRSlv//U1+0V430tLJbecs8G7KKtg18U6FMsWls+lbg2weuzS8MpTgM2TXk33dKOQfgjq1ay71HvPLIOJ2nTac3TNJFqEThLtTuoCArDKo08qoWNu9P18hk= test-user2@example.com",
+    
+    # Key without expiration date
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBTZSt5IZWZaGEJt8l5CI4DijXPr78L7HHEfB3SJlzFZ test-user3@example.com"
+]
 
-def create_test_config(test_home, db_path):
+
+def create_test_config(test_home, db_path, enable_expiration=False):
     """Create a test configuration file."""
     config_path = os.path.join(test_home, "test_config.ini")
     config = configparser.ConfigParser()
@@ -41,7 +54,8 @@ def create_test_config(test_home, db_path):
     }
     
     config['keys'] = {
-        'expiration_days': '30'
+        'expiration_days': '30',
+        'enable_expiration_dates': str(enable_expiration).lower()
     }
     
     config['email'] = {
@@ -60,7 +74,7 @@ def create_test_config(test_home, db_path):
     return config_path
 
 
-def setup_test_environment():
+def setup_test_environment(enable_expiration=False):
     """Create a temporary test environment with simulated user home directories."""
     # Create a temporary directory to simulate /home
     test_home = tempfile.mkdtemp(prefix="ssh_key_cop_test_")
@@ -77,7 +91,10 @@ def setup_test_environment():
         with open(os.path.join(ssh_dir, "authorized_keys"), "w") as f:
             # Each user gets a different key
             key_index = usernames.index(username) % len(SAMPLE_KEYS)
-            f.write(SAMPLE_KEYS[key_index] + "\n")
+            if enable_expiration:
+                f.write(SAMPLE_KEYS_WITH_EXPIRATION[key_index] + "\n")
+            else:
+                f.write(SAMPLE_KEYS[key_index] + "\n")
     
     # Create a test database with an older key
     db_path = os.path.join(test_home, "test_ssh_key_cop.db")
@@ -108,7 +125,7 @@ def setup_test_environment():
     conn.close()
     
     # Create test configuration
-    config_path = create_test_config(test_home, db_path)
+    config_path = create_test_config(test_home, db_path, enable_expiration)
     
     return test_home, db_path, config_path
 
@@ -127,6 +144,7 @@ def run_ssh_key_cop(test_home, config_path):
 import os
 import sys
 import importlib.util
+import re
 
 # Import ssh_key_cop.py as a module using its file path
 spec = importlib.util.spec_from_file_location("ssh_key_cop", "{ssh_key_cop_path}")
@@ -149,7 +167,7 @@ ssh_key_cop.SSHKeyCop.get_all_user_homes = patched_get_all_user_homes
 original_parse_auth_keys = ssh_key_cop.SSHKeyCop.parse_authorized_keys
 def patched_parse_auth_keys(self, username):
     auth_keys_path = os.path.join("{test_home}", username, ".ssh", "authorized_keys")
-    key_signatures = []
+    key_info = []
     
     if not os.path.exists(auth_keys_path):
         self.logger.debug(f"No authorized_keys file found for user {{username}}")
@@ -162,16 +180,26 @@ def patched_parse_auth_keys(self, username):
                 if not line or line.startswith('#'):
                     continue
                 
+                # Check for expiration-time directive
+                expiration_date = None
+                if 'expiry-time=' in line:
+                    pattern = r'expiry-time=([0-9]{{12}})'
+                    match = re.search(pattern, line)
+                    if match:
+                        expiration_date = match.group(1)
+                        # Remove the directive from the line for key parsing
+                        line = re.sub(r'expiry-time=[0-9]{{12}}\\s+', '', line)
+                
                 # The key is in the format "type signature comment"
                 parts = line.split()
                 if len(parts) >= 2:
                     key_signature = parts[1]
-                    key_signatures.append(key_signature)
+                    key_info.append((key_signature, expiration_date))
     except Exception as e:
         self.logger.error(f"Error reading authorized_keys for {{username}}: {{e}}")
         
-    self.logger.debug(f"Found {{len(key_signatures)}} keys for user {{username}}")
-    return key_signatures
+    self.logger.debug(f"Found {{len(key_info)}} keys for user {{username}}")
+    return key_info
 ssh_key_cop.SSHKeyCop.parse_authorized_keys = patched_parse_auth_keys
 
 # Run SSH Key Cop with our test arguments
@@ -192,11 +220,13 @@ def main():
     parser = argparse.ArgumentParser(description="Test SSH Key Cop functionality")
     parser.add_argument("--keep-files", action="store_true",
                         help="Keep the test files after running (for debugging)")
+    parser.add_argument("--test-expiration", action="store_true",
+                        help="Test the expiration date functionality")
     
     args = parser.parse_args()
     
     print("Setting up test environment...")
-    test_home, db_path, config_path = setup_test_environment()
+    test_home, db_path, config_path = setup_test_environment(args.test_expiration)
     print(f"Test environment created at: {test_home}")
     print(f"Test database: {db_path}")
     print(f"Test config: {config_path}")

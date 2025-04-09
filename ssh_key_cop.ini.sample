@@ -6,6 +6,9 @@ path = ssh_key_cop.db
 # Number of days before a key is considered expired
 expiration_days = 30
 
+# Whether to add expiration dates to authorized_keys files
+enable_expiration_dates = false
+
 [email]
 # Email recipient for violation reports
 to_address = rmcdermo@fredhutch.org

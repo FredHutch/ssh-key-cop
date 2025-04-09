@@ -4,7 +4,7 @@ A utility to monitor and enforce SSH key rotation policies.
 
 ## Description
 
-SSH Key Cop checks user's authorized_keys files to enforce key rotation policies. It identifies SSH keys that have been in use longer than a specified threshold (e.g. 30 days) and reports violations via email.
+SSH Key Cop checks user's authorized_keys files to enforce key rotation policies. It identifies SSH keys that have been in use longer than a specified threshold (e.g. 30 days) and reports violations via email. It can also automatically add expiration dates to SSH keys in the authorized_keys file to enforce key rotation at the SSH level.
 
 ## Features
 
@@ -15,6 +15,8 @@ SSH Key Cop checks user's authorized_keys files to enforce key rotation policies
 - External configuration file in INI format
 - Dry-run mode for testing
 - Database dump option to view all tracked keys
+- Automatic expiration date management for SSH keys
+- Enforces key rotation at both application and SSH levels
 
 ## Requirements
 
@@ -53,6 +55,7 @@ The configuration file contains these sections:
 
 #### [keys]
 - `expiration_days`: Number of days before a key is considered expired
+- `enable_expiration_dates`: Whether to add expiration dates to authorized_keys files (true/false)
 
 #### [email]
 - `to_address`: Email recipient for violation reports
@@ -119,6 +122,18 @@ Use a specific configuration file:
 uv run ssh_key_cop.py --config /path/to/custom/config.ini
 ```
 
+## Expiration Date Management
+
+When `enable_expiration_dates` is set to `true` in the configuration, SSH Key Cop will:
+
+1. Add `expiry-time="YYYYMMDDHHMM"` directives to keys in authorized_keys files
+2. Calculate expiration dates based on the key's first seen date in the database
+3. Validate existing expiration dates against the database
+4. Correct expiration dates that don't match the expected date
+5. Add expiration dates to keys that don't have them
+
+The expiration date format is `YYYYMMDDHHMM` (e.g., "202504101116" for April 10, 2025, 11:16 AM).
+
 ## Running as a Scheduled Task
 
 To set up as a cron job for regularly monitoring keys, add something like:
@@ -133,3 +148,5 @@ To set up as a cron job for regularly monitoring keys, add something like:
 - Automatically remove expired keys from authorized_keys files
 - Extended reporting and statistics
 - Web interface for easy monitoring
+- Support for different expiration date formats
+- Key rotation automation

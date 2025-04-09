@@ -32,6 +32,9 @@ class SSHKeyCop:
             config_path: Path to the configuration file.
             dry_run: If True, don't send emails or update the database.
         """
+        # Set up logging first
+        self.setup_logging()
+        
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
             
@@ -40,6 +43,8 @@ class SSHKeyCop:
         
         self.db_path = self.config.get('database', 'path')
         self.days_threshold = self.config.getint('keys', 'expiration_days')
+        self.enable_expiration_dates = self.config.getboolean('keys', 'enable_expiration_dates', fallback=False)
+        self.logger.info(f"Expiration dates enabled: {self.enable_expiration_dates}")
         self.email_to = self.config.get('email', 'to_address')
         self.email_from = self.config.get('email', 'from_address')
         self.smtp_server = self.config.get('email', 'smtp_server')
@@ -57,7 +62,6 @@ class SSHKeyCop:
         self.dry_run = dry_run
         self.conn = None
         self.cursor = None
-        self.setup_logging()
         self.setup_database()
 
     def setup_logging(self):
@@ -109,7 +113,21 @@ class SSHKeyCop:
         self.logger.info(f"Found {len(users)} user home directories")
         return users
 
-    def parse_authorized_keys(self, username: str) -> List[str]:
+    def calculate_expiration_date(self, first_seen_date: str) -> str:
+        """
+        Calculate the expiration date for a key based on its first seen date.
+        
+        Args:
+            first_seen_date: ISO format date string when the key was first seen
+            
+        Returns:
+            Expiration date in YYYYMMDDHHMM format
+        """
+        first_seen = datetime.datetime.fromisoformat(first_seen_date)
+        expiration = first_seen + datetime.timedelta(days=self.days_threshold)
+        return expiration.strftime("%Y%m%d%H%M")
+
+    def parse_authorized_keys(self, username: str) -> List[Tuple[str, Optional[str]]]:
         """
         Parse the authorized_keys file for a given user.
         
@@ -117,10 +135,10 @@ class SSHKeyCop:
             username: The username to check
             
         Returns:
-            List of key signatures from authorized_keys file
+            List of tuples containing (key_signature, expiration_date) from authorized_keys file
         """
         auth_keys_path = f"/home/{username}/.ssh/authorized_keys"
-        key_signatures = []
+        key_info = []
         
         if not os.path.exists(auth_keys_path):
             self.logger.debug(f"No authorized_keys file found for user {username}")
@@ -133,16 +151,25 @@ class SSHKeyCop:
                     if not line or line.startswith('#'):
                         continue
                     
+                    # Check for expiration-time directive
+                    expiration_date = None
+                    if 'expiry-time=' in line:
+                        match = re.search(r'expiry-time="([0-9]{12})"', line)
+                        if match:
+                            expiration_date = match.group(1)
+                            # Remove the directive from the line for key parsing
+                            line = re.sub(r'expiry-time="[0-9]{12}"\s+', '', line)
+                    
                     # The key is in the format "type signature comment"
                     parts = line.split()
                     if len(parts) >= 2:
                         key_signature = parts[1]
-                        key_signatures.append(key_signature)
+                        key_info.append((key_signature, expiration_date))
         except Exception as e:
             self.logger.error(f"Error reading authorized_keys for {username}: {e}")
             
-        self.logger.debug(f"Found {len(key_signatures)} keys for user {username}")
-        return key_signatures
+        self.logger.debug(f"Found {len(key_info)} keys for user {username}")
+        return key_info
 
     def is_key_expired(self, first_seen_date: str) -> bool:
         """
@@ -266,6 +293,85 @@ class SSHKeyCop:
         except Exception as e:
             self.logger.error(f"Error preparing email: {e}")
 
+    def update_authorized_keys(self, username: str, key_signatures: List[Tuple[str, Optional[str]]]) -> None:
+        """
+        Update the authorized_keys file with expiration dates.
+        
+        Args:
+            username: The username to update
+            key_signatures: List of tuples containing (key_signature, expiration_date)
+        """
+        if not self.enable_expiration_dates:
+            self.logger.debug("Expiration dates are disabled, skipping update")
+            return
+            
+        auth_keys_path = f"/home/{username}/.ssh/authorized_keys"
+        if not os.path.exists(auth_keys_path):
+            self.logger.warning(f"Authorized_keys file not found for {username}")
+            return
+            
+        try:
+            # Read the original file
+            with open(auth_keys_path, 'r') as f:
+                original_lines = f.readlines()
+            
+            # Create a mapping of key signatures to their full lines
+            key_to_line = {}
+            comments = []
+            for line in original_lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith('#'):
+                    comments.append(line)
+                    continue
+                
+                # Extract key signature
+                parts = line.split()
+                if len(parts) >= 2:
+                    # Handle lines with expiration dates
+                    if 'expiry-time=' in line:
+                        # Remove the expiration date for key matching
+                        clean_line = re.sub(r'expiry-time="[0-9]{12}"\s+', '', line)
+                        parts = clean_line.split()
+                    
+                    if len(parts) >= 2:
+                        key_sig = parts[1]
+                        key_to_line[key_sig] = line
+            
+            # Update lines with expiration dates
+            updated_lines = []
+            # Add back comments at the top
+            updated_lines.extend(comments)
+            
+            # Create a set of keys that need updates
+            keys_to_update = {k[0] for k in key_signatures if k[1] is not None}
+            
+            for key_sig, exp_date in key_signatures:
+                if key_sig in key_to_line:
+                    line = key_to_line[key_sig]
+                    if key_sig in keys_to_update:
+                        # Only update lines that need changes
+                        if 'expiry-time=' in line:
+                            line = re.sub(r'expiry-time="[0-9]{12}"\s+', f'expiry-time="{exp_date}" ', line)
+                        else:
+                            line = f'expiry-time="{exp_date}" {line}'
+                        self.logger.info(f"Adding expiration date {exp_date} to key for {username}")
+                    updated_lines.append(line + '\n')
+            
+            if self.dry_run:
+                self.logger.info(f"[DRY RUN] Would update authorized_keys for {username}")
+                return
+                
+            # Write the updated file
+            with open(auth_keys_path, 'w') as f:
+                f.writelines(updated_lines)
+                
+            self.logger.info(f"Updated authorized_keys for user {username}")
+        except Exception as e:
+            self.logger.error(f"Error updating authorized_keys for {username}: {e}")
+            self.logger.error(f"Error details: {str(e)}")
+
     def check_all_users(self) -> List[Dict]:
         """
         Check all users for SSH key violations.
@@ -276,17 +382,40 @@ class SSHKeyCop:
         violations = []
         
         for username in self.get_all_user_homes():
-            key_signatures = self.parse_authorized_keys(username)
+            key_info_list = self.parse_authorized_keys(username)
+            key_signatures = [k[0] for k in key_info_list]
             
-            for key_sig in key_signatures:
-                key_info = self.get_key_info(username, key_sig)
+            # Track which keys need updates
+            keys_to_update = []
+            
+            for key_sig, exp_date in key_info_list:
+                db_key_info = self.get_key_info(username, key_sig)
                 
-                if key_info is None:
+                if db_key_info is None:
                     # New key, add to database
                     self.add_key_to_database(username, key_sig)
+                    if self.enable_expiration_dates:
+                        # Calculate expiration date for new key
+                        now = datetime.datetime.now().isoformat()
+                        new_exp_date = self.calculate_expiration_date(now)
+                        keys_to_update.append((key_sig, new_exp_date))
                 else:
                     # Existing key, check if expired
-                    key_id, db_username, first_seen_date = key_info
+                    key_id, db_username, first_seen_date = db_key_info
+                    
+                    # Calculate expected expiration date
+                    expected_exp_date = self.calculate_expiration_date(first_seen_date)
+                    
+                    # Check if expiration date matches database record
+                    if exp_date and exp_date != expected_exp_date:
+                        self.logger.warning(
+                            f"Key expiration date mismatch for {username}: "
+                            f"expected {expected_exp_date}, found {exp_date}"
+                        )
+                        keys_to_update.append((key_sig, expected_exp_date))
+                    elif not exp_date and self.enable_expiration_dates:
+                        # Add expiration date to key without one
+                        keys_to_update.append((key_sig, expected_exp_date))
                     
                     if self.is_key_expired(first_seen_date):
                         first_seen = datetime.datetime.fromisoformat(first_seen_date)
@@ -304,6 +433,20 @@ class SSHKeyCop:
                             f"Key violation: {username}'s key is {days_old} days old "
                             f"(first seen: {first_seen_date})"
                         )
+            
+            # Update keys that need changes
+            if keys_to_update and self.enable_expiration_dates:
+                # Create updated key info list with new expiration dates
+                updated_key_info = []
+                for key_sig, exp_date in key_info_list:
+                    # Find if this key needs an update
+                    update = next((k for k in keys_to_update if k[0] == key_sig), None)
+                    if update:
+                        updated_key_info.append((key_sig, update[1]))
+                    else:
+                        updated_key_info.append((key_sig, exp_date))
+                
+                self.update_authorized_keys(username, updated_key_info)
         
         return violations
 

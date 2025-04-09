@@ -179,16 +179,6 @@ WARNING: Key violation: user1's key is 45 days old (first seen: 2024-02-01T12:00
 WARNING: Key violation: user2's key is 60 days old (first seen: 2024-01-15T08:30:00)
 ```
 
-### Viewing Logs
-
-Depending on your configuration, logs can be viewed in different ways:
-
-1. Console output (always available)
-2. Log file (if configured):
-   ```bash
-   sudo tail -f /var/log/ssh-key-cop.log
-   ```
-
 ## Security Considerations
 
 1. The script needs to access and modify files located in user's home directories, this means it will need to run with `root` or `sudo` rights for function correctly.

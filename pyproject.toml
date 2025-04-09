@@ -1,0 +1,12 @@
+[project]
+name = "ssh-key-cop"
+version = "0.1.0"
+description = "A utility to monitor and enforce SSH key rotation policies"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+authors = ["Robert McDermott <robert.c.mcdermott@gmail.com>"]
+license = "Apache 2.0"
+
+[project.scripts]
+ssh-key-cop = "ssh_key_cop:main"

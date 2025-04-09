@@ -1,0 +1,25 @@
+[database]
+# Path to the SQLite database file
+path = ssh_key_cop.db
+
+[keys]
+# Number of days before a key is considered expired
+expiration_days = 30
+
+[email]
+# Email recipient for violation reports
+to_address = rmcdermo@fredhutch.org
+
+# Email sender address
+from_address = ssh-key-cop@example.com
+
+# SMTP server settings
+smtp_server = localhost
+smtp_port = 25
+
+# Authentication (leave blank if not required)
+smtp_username = 
+smtp_password = 
+
+# Whether to use TLS for SMTP connection
+use_tls = false 

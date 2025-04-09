@@ -1,0 +1,15 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.db
+*.log
+*.pyc
+.pytest_cache/
+ssh_key_cop_test_*/
+
+# Virtual environments
+.venv

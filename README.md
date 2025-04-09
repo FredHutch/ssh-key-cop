@@ -11,7 +11,6 @@ SSH Key Cop checks user's authorized_keys files to enforce key rotation policies
 - Scans all user home directories for authorized_keys files
 - Tracks SSH key usage with an SQLite database
 - Reports keys that exceed the age threshold via logging
-- Configurable key rotation policies
 - External configuration file in INI format
 - Dry-run mode for testing
 - Database dump option to view all tracked keys
@@ -195,8 +194,4 @@ Depending on your configuration, logs can be viewed in different ways:
 1. The script needs to access and modify files located in user's home directories, this means it will need to run with `root` or `sudo` rights for function correctly.
 2. The script and its configuration files should be owned by root and not writable by other users
 3. The database file should be readable only by root
-4. Consider using SELinux or AppArmor to restrict the script's access to only necessary directories
-5. Monitor the logs for any unauthorized access attempts
-6. Regular security audits should be performed on the script and its configuration
-
 

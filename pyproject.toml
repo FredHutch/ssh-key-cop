@@ -1,6 +1,6 @@
 [project]
 name = "ssh-key-cop"
-version = "0.1.0"
+version = "0.2.0"
 description = "A utility to monitor and enforce SSH key rotation policies"
 readme = "README.md"
 requires-python = ">=3.12"

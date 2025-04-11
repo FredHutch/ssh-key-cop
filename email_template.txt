@@ -1,0 +1,35 @@
+---- WARNING TEMPLATE ----
+Subject: SSH Key Expiration Warning
+
+Dear {username},
+
+This is an automated notification from SSH Key Cop.
+
+Your SSH key (signature: {key_signature}) on the SSH gateway server will expire in {days_remaining} days, on {expiration_date}.
+
+To prevent access issues, please rotate your key before it expires by:
+1. Generating a new SSH key pair
+2. Adding the new public key to your ~/.ssh/authorized_keys file
+3. Testing the connection with your new key
+
+If you need assistance, please contact the system administrator.
+
+Thank you for helping maintain our security standards.
+
+---- EXPIRED TEMPLATE ----
+Subject: SSH Key Has Expired
+
+Dear {username},
+
+This is an automated notification from SSH Key Cop.
+
+Your SSH key (signature: {key_signature}) on the SSH gateway server expired on {expiration_date} ({days_expired} days ago).
+
+To regain access, please:
+1. Generate a new SSH key pair
+2. Add the new public key to your ~/.ssh/authorized_keys file
+3. Test the connection with your new key
+
+If you need assistance, please contact the system administrator.
+
+Note: Your expired key will be automatically removed from the system within 48 hours. 

@@ -4,7 +4,7 @@ A utility to monitor and enforce SSH key rotation policies.
 
 ## Description
 
-SSH Key Cop checks user's authorized_keys files to enforce key rotation policies. It identifies SSH keys that have been in use longer than a specified threshold (e.g. 30 days) and logs violations. It can also automatically add expiration dates to SSH keys in the authorized_keys file to enforce key rotation at the SSH level.
+SSH Key Cop checks user's authorized_keys files to enforce key rotation policies. It identifies SSH keys that have been in use longer than a specified threshold (e.g. 30 days) and logs violations. It can also automatically add expiration dates to SSH keys in the authorized_keys file to enforce key rotation at the SSH level, and send email notifications when keys are about to expire or have expired.
 
 ## Features
 
@@ -16,7 +16,9 @@ SSH Key Cop checks user's authorized_keys files to enforce key rotation policies
 - Database dump option to view all tracked keys
 - Automatic expiration date management for SSH keys
 - Enforces key rotation by setting key expiration dates
-- Tamper proof, will detect and correct any attempts by the user to remove or change the expiration date.
+- Tamper proof, will detect and correct any attempts by the user to remove or change the expiration date
+- Email notifications for soon-to-expire and expired keys
+- Customizable email templates
 
 ## Requirements
 
@@ -81,6 +83,24 @@ The configuration file contains these sections:
 #### [keys]
 - `expiration_days`: Number of days before a key is considered expired
 - `enable_expiration_dates`: Whether to add expiration dates to authorized_keys files (true/false)
+
+#### [email]
+- `enable_notifications`: Whether to enable email notifications (true/false)
+- `notification_days_before`: Number of days before expiration to send warning notification
+- `template_path`: Path to the email template file
+- `notify_admin`: Whether to send copies of all notifications to the admin email address (true/false)
+- `to_address`: Administrator email address for notifications
+- `from_address`: Sender email address for notifications
+- `smtp_server`: SMTP server hostname
+- `smtp_port`: SMTP server port
+- `smtp_username`: SMTP authentication username (optional)
+- `smtp_password`: SMTP authentication password (optional)
+- `use_tls`: Whether to use TLS for SMTP connections (true/false)
+- `default_domain`: Default domain for user email addresses (defaults to fredhutch.org)
+
+#### [user_emails]
+- Custom mappings for user email addresses in the format: `username = email@example.com`
+- If not specified, user emails are constructed as `username@default_domain`
 
 ## Usage
 
@@ -184,4 +204,70 @@ WARNING: Key violation: user2's key is 60 days old (first seen: 2024-01-15T08:30
 1. The script needs to access and modify files located in user's home directories, this means it will need to run with `root` or `sudo` rights for function correctly.
 2. The script and its configuration files should be owned by root and not writable by other users
 3. The database file should be readable only by root
+
+## Email Notifications
+
+When `enable_notifications` is set to `true` in the configuration, SSH Key Cop will:
+
+1. Send warning emails to users when their keys are about to expire (within the `notification_days_before` threshold)
+2. Send notifications when keys have expired
+3. Track sent notifications to avoid duplicate emails
+4. Use customizable email templates
+
+### Email Templates
+
+Email templates are defined in a separate file (specified by `template_path` in the config) and have two sections:
+
+```
+---- WARNING TEMPLATE ----
+Subject: SSH Key Expiration Warning
+
+Dear {username},
+
+This is an automated notification from SSH Key Cop.
+
+Your SSH key (signature: {key_signature}) on the SSH gateway server will expire in {days_remaining} days, on {expiration_date}.
+
+To prevent access issues, please rotate your key before it expires by:
+1. Generating a new SSH key pair
+2. Adding the new public key to your ~/.ssh/authorized_keys file
+3. Testing the connection with your new key
+
+If you need assistance, please contact the system administrator.
+
+Thank you for helping maintain our security standards.
+
+---- EXPIRED TEMPLATE ----
+Subject: SSH Key Has Expired
+
+Dear {username},
+
+This is an automated notification from SSH Key Cop.
+
+Your SSH key (signature: {key_signature}) on the SSH gateway server expired on {expiration_date} ({days_expired} days ago).
+
+To regain access, please:
+1. Generate a new SSH key pair
+2. Add the new public key to your ~/.ssh/authorized_keys file
+3. Test the connection with your new key
+
+If you need assistance, please contact the system administrator.
+
+Note: Your expired key will be automatically removed from the system within 48 hours.
+```
+
+Available template variables:
+- `{username}`: The user's username
+- `{key_signature}`: The SSH key signature
+- `{expiration_date}`: The key's expiration date (format: YYYY-MM-DD)
+- `{days_remaining}`: Days remaining until expiration (for warning template)
+- `{days_expired}`: Days since expiration (for expired template)
+
+### Email Addressing
+
+SSH Key Cop determines user email addresses as follows:
+
+1. Check for a specific override in the `[user_emails]` section
+2. If no override exists, combine the username with the `default_domain` from the config
+3. Default domain is "fredhutch.org" if not specified
 

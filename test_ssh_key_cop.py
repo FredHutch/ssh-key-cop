@@ -44,7 +44,7 @@ SAMPLE_KEYS_WITH_EXPIRATION = [
 ]
 
 
-def create_test_config(test_home, db_path, enable_expiration=False):
+def create_test_config(test_home, db_path, enable_expiration=False, enable_email=False):
     """Create a test configuration file."""
     config_path = os.path.join(test_home, "test_config.ini")
     config = configparser.ConfigParser()
@@ -58,13 +58,49 @@ def create_test_config(test_home, db_path, enable_expiration=False):
         'enable_expiration_dates': str(enable_expiration).lower()
     }
     
+    # Add email section if enabled
+    if enable_email:
+        template_path = os.path.join(test_home, "email_template.txt")
+        
+        # Create a simple email template file
+        with open(template_path, 'w') as f:
+            f.write("""---- WARNING TEMPLATE ----
+Subject: Test Warning
+
+Your key will expire in {days_remaining} days (on {expiration_date}).
+
+---- EXPIRED TEMPLATE ----
+Subject: Test Expired
+
+Your key expired on {expiration_date} ({days_expired} days ago).
+""")
+            
+        config['email'] = {
+            'enable_notifications': 'true',
+            'notification_days_before': '7',
+            'template_path': template_path,
+            'to_address': 'test@example.com',
+            'from_address': 'ssh-key-cop@example.com',
+            'smtp_server': 'localhost',  # Using localhost to avoid actual email sending
+            'smtp_port': '25',
+            'use_tls': 'false',
+            'notify_admin': 'true'
+        }
+        
+        # Add user email mappings
+        config['user_emails'] = {
+            'user1': 'user1@example.com',
+            'user2': 'user2@example.com',
+            'user3': 'user3@example.com'
+        }
+    
     with open(config_path, 'w') as f:
         config.write(f)
     
     return config_path
 
 
-def setup_test_environment(enable_expiration=False):
+def setup_test_environment(enable_expiration=False, enable_email=False):
     """Create a temporary test environment with simulated user home directories."""
     # Create a temporary directory to simulate /home
     test_home = tempfile.mkdtemp(prefix="ssh_key_cop_test_")
@@ -102,6 +138,19 @@ def setup_test_environment(enable_expiration=False):
         )
     ''')
     
+    # Create email notification tracking table if email is enabled
+    if enable_email:
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS email_notifications (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                key_signature TEXT NOT NULL,
+                notification_type TEXT NOT NULL,
+                sent_date TEXT NOT NULL,
+                UNIQUE(username, key_signature, notification_type)
+            )
+        ''')
+    
     # Insert old key for user2 (simulating a key that's older than 30 days)
     old_date = (datetime.datetime.now() - datetime.timedelta(days=45)).isoformat()
     key_signature = SAMPLE_KEYS[1].split()[1]  # Extract key signature
@@ -111,11 +160,21 @@ def setup_test_environment(enable_expiration=False):
         ("user2", key_signature, old_date)
     )
     
+    # Insert key that's about to expire (for testing warning notifications)
+    if enable_email:
+        about_to_expire = (datetime.datetime.now() - datetime.timedelta(days=25)).isoformat()
+        key_signature = SAMPLE_KEYS[0].split()[1]  # Extract key signature
+        
+        cursor.execute(
+            "INSERT INTO ssh_keys (username, key_signature, first_seen_date) VALUES (?, ?, ?)",
+            ("user1", key_signature, about_to_expire)
+        )
+    
     conn.commit()
     conn.close()
     
     # Create test configuration
-    config_path = create_test_config(test_home, db_path, enable_expiration)
+    config_path = create_test_config(test_home, db_path, enable_expiration, enable_email)
     
     return test_home, db_path, config_path
 
@@ -192,6 +251,31 @@ def patched_parse_auth_keys(self, username):
     return key_info
 ssh_key_cop.SSHKeyCop.parse_authorized_keys = patched_parse_auth_keys
 
+# Monkey patch the send_email method to simulate email sending for testing
+if hasattr(ssh_key_cop.SSHKeyCop, 'send_email'):
+    original_send_email = ssh_key_cop.SSHKeyCop.send_email
+    def patched_send_email(self, subject, message_body, to_address=None):
+        # Instead of sending an actual email, just log it
+        self.logger.info(f"[TEST] Would send email with subject: {{subject}}")
+        self.logger.info(f"[TEST] To: {{to_address}}")
+        self.logger.debug(f"[TEST] Email body: {{message_body[:100]}}...")
+        
+        # Write the email to a file for inspection
+        emails_dir = os.path.join("{test_home}", "sent_emails")
+        os.makedirs(emails_dir, exist_ok=True)
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        email_path = os.path.join(emails_dir, f"{{timestamp}}_{{subject.replace(' ', '_')}}.txt")
+        
+        with open(email_path, 'w') as f:
+            f.write(f"To: {{to_address}}\\n")
+            f.write(f"Subject: {{subject}}\\n")
+            f.write("\\n")
+            f.write(message_body)
+        
+        self.logger.info(f"[TEST] Email saved to {{email_path}}")
+    ssh_key_cop.SSHKeyCop.send_email = patched_send_email
+
 # Run SSH Key Cop with our test arguments
 sys.argv = ["ssh_key_cop.py", "-c", "{config_path}", "-v", "--dry-run"]
 ssh_key_cop.main()
@@ -212,11 +296,13 @@ def main():
                         help="Keep the test files after running (for debugging)")
     parser.add_argument("--test-expiration", action="store_true",
                         help="Test the expiration date functionality")
+    parser.add_argument("--test-email", action="store_true",
+                        help="Test the email notification functionality")
     
     args = parser.parse_args()
     
     print("Setting up test environment...")
-    test_home, db_path, config_path = setup_test_environment(args.test_expiration)
+    test_home, db_path, config_path = setup_test_environment(args.test_expiration, args.test_email)
     print(f"Test environment created at: {test_home}")
     print(f"Test database: {db_path}")
     print(f"Test config: {config_path}")

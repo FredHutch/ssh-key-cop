@@ -18,6 +18,10 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import socket
 
 
 class SSHKeyCop:
@@ -41,6 +45,13 @@ class SSHKeyCop:
         self.days_threshold = self.config.getint('keys', 'expiration_days')
         self.enable_expiration_dates = self.config.getboolean('keys', 'enable_expiration_dates', fallback=False)
         
+        # Email notification settings - basic setup only
+        self.enable_email_notifications = self.config.getboolean('email', 'enable_notifications', fallback=False)
+        if self.enable_email_notifications:
+            self.notification_days = self.config.getint('email', 'notification_days_before', fallback=7)
+            self.email_template_path = self.config.get('email', 'template_path', fallback='email_template.txt')
+            self.notify_admin = self.config.getboolean('email', 'notify_admin', fallback=True)
+        
         self.dry_run = dry_run
         self.conn = None
         self.cursor = None
@@ -48,6 +59,11 @@ class SSHKeyCop:
         # Set up logging after config is loaded
         self.setup_logging()
         self.logger.info(f"Expiration dates enabled: {self.enable_expiration_dates}")
+        
+        # Now log email notification settings after logger is set up
+        if self.enable_email_notifications:
+            self.logger.info(f"Email notifications enabled: warning at {self.notification_days} days before expiration")
+            self.logger.info(f"Admin notifications: {self.notify_admin}")
         
         self.setup_database()
 
@@ -107,6 +123,19 @@ class SSHKeyCop:
                 UNIQUE(username, key_signature)
             )
         ''')
+        
+        # Create email notification tracking table
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS email_notifications (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                key_signature TEXT NOT NULL,
+                notification_type TEXT NOT NULL,
+                sent_date TEXT NOT NULL,
+                UNIQUE(username, key_signature, notification_type)
+            )
+        ''')
+        
         self.conn.commit()
         self.logger.info(f"Connected to database: {self.db_path}")
 
@@ -433,9 +462,309 @@ class SSHKeyCop:
             
             print(f"{username:<20} {first_seen_date:<25} {days_old:<10} {key_short}")
 
+    def load_email_template(self, template_type):
+        """
+        Load email template from file.
+        
+        Args:
+            template_type: Either 'warning' or 'expired'
+            
+        Returns:
+            Template string
+        """
+        template_path = self.email_template_path
+        if not os.path.exists(template_path):
+            self.logger.warning(f"Email template not found: {template_path}")
+            # Provide a basic fallback template
+            if template_type == 'warning':
+                return "Warning: Your SSH key will expire in {days_remaining} days (on {expiration_date})."
+            else:
+                return "Alert: Your SSH key has expired on {expiration_date}."
+        
+        try:
+            with open(template_path, 'r') as f:
+                template_content = f.read()
+                
+            # Extract the appropriate section from the template
+            if template_type == 'warning':
+                match = re.search(r'---- WARNING TEMPLATE ----\n(.*?)\n---- EXPIRED TEMPLATE ----', 
+                                template_content, re.DOTALL)
+                if match:
+                    return match.group(1).strip()
+            else:  # expired template
+                match = re.search(r'---- EXPIRED TEMPLATE ----\n(.*?)(?:\n----.*----|\Z)', 
+                                template_content, re.DOTALL)
+                if match:
+                    return match.group(1).strip()
+                    
+            # If we couldn't extract specific templates, use the whole file
+            return template_content
+        except Exception as e:
+            self.logger.error(f"Error reading email template: {e}")
+            return f"SSH Key Cop Notification: {template_type}"
+
+    def has_notification_been_sent(self, username, key_signature, notification_type):
+        """
+        Check if a notification has already been sent for this key.
+        
+        Args:
+            username: The username
+            key_signature: The SSH key signature
+            notification_type: Either 'warning' or 'expired'
+            
+        Returns:
+            True if notification has been sent, False otherwise
+        """
+        try:
+            self.cursor.execute(
+                """SELECT id FROM email_notifications 
+                   WHERE username = ? AND key_signature = ? AND notification_type = ?""",
+                (username, key_signature, notification_type)
+            )
+            result = self.cursor.fetchone()
+            return result is not None
+        except sqlite3.Error as e:
+            self.logger.error(f"Database error checking notification status: {e}")
+            return False
+
+    def record_notification_sent(self, username, key_signature, notification_type):
+        """
+        Record that a notification has been sent.
+        
+        Args:
+            username: The username
+            key_signature: The SSH key signature
+            notification_type: Either 'warning' or 'expired'
+        """
+        if self.dry_run:
+            self.logger.info(f"[DRY RUN] Would record {notification_type} notification for {username}")
+            return
+            
+        try:
+            now = datetime.datetime.now().isoformat()
+            self.cursor.execute(
+                """INSERT OR REPLACE INTO email_notifications 
+                   (username, key_signature, notification_type, sent_date) 
+                   VALUES (?, ?, ?, ?)""",
+                (username, key_signature, notification_type, now)
+            )
+            self.conn.commit()
+            self.logger.info(f"Recorded {notification_type} notification for {username}")
+        except sqlite3.Error as e:
+            self.logger.error(f"Database error recording notification: {e}")
+
+    def send_email(self, subject, message_body, to_address=None):
+        """
+        Send an email notification.
+        
+        Args:
+            subject: Email subject
+            message_body: Email message body
+            to_address: Recipient address (uses config default if None)
+        """
+        if self.dry_run:
+            self.logger.info(f"[DRY RUN] Would send email: {subject}")
+            self.logger.debug(f"[DRY RUN] Email body: {message_body}")
+            return
+            
+        if not self.enable_email_notifications:
+            return
+            
+        # Get email configuration
+        from_address = self.config.get('email', 'from_address', fallback='ssh-key-cop@localhost')
+        if to_address is None:
+            to_address = self.config.get('email', 'to_address')
+        
+        smtp_server = self.config.get('email', 'smtp_server')
+        smtp_port = self.config.getint('email', 'smtp_port', fallback=25)
+        smtp_username = self.config.get('email', 'smtp_username', fallback='')
+        smtp_password = self.config.get('email', 'smtp_password', fallback='')
+        use_tls = self.config.getboolean('email', 'use_tls', fallback=False)
+        
+        # Create email message
+        msg = MIMEMultipart()
+        msg['From'] = from_address
+        msg['To'] = to_address
+        msg['Subject'] = subject
+        
+        # Add hostname for troubleshooting
+        hostname = socket.gethostname()
+        full_message = f"{message_body}\n\n-- \nSent from SSH Key Cop on {hostname}"
+        
+        msg.attach(MIMEText(full_message, 'plain'))
+        
+        try:
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            server.ehlo()
+            
+            if use_tls:
+                server.starttls()
+                server.ehlo()
+                
+            if smtp_username and smtp_password:
+                server.login(smtp_username, smtp_password)
+                
+            server.sendmail(from_address, to_address, msg.as_string())
+            server.quit()
+            
+            self.logger.info(f"Email sent to {to_address}")
+        except Exception as e:
+            self.logger.error(f"Error sending email: {e}")
+
+    def check_for_expiring_keys(self):
+        """
+        Check for keys that are approaching expiration and need notifications.
+        
+        This checks for keys that will expire within the notification_days threshold.
+        """
+        if not self.enable_email_notifications:
+            return
+            
+        self.logger.info("Checking for keys approaching expiration...")
+        
+        # Get the current date
+        now = datetime.datetime.now()
+        
+        # Query for all keys
+        try:
+            self.cursor.execute("SELECT username, key_signature, first_seen_date FROM ssh_keys")
+            keys = self.cursor.fetchall()
+            
+            warning_count = 0
+            expired_count = 0
+            
+            for username, key_signature, first_seen_date in keys:
+                first_seen = datetime.datetime.fromisoformat(first_seen_date)
+                expiration_date = first_seen + datetime.timedelta(days=self.days_threshold)
+                
+                # Check if the key is already expired
+                if now > expiration_date:
+                    days_expired = (now - expiration_date).days
+                    
+                    # Only send if notification hasn't been sent already
+                    if not self.has_notification_been_sent(username, key_signature, 'expired'):
+                        self.send_key_expired_notification(username, key_signature, expiration_date, days_expired)
+                        self.record_notification_sent(username, key_signature, 'expired')
+                        expired_count += 1
+                else:
+                    # Check if the key will expire soon
+                    days_remaining = (expiration_date - now).days
+                    
+                    if days_remaining <= self.notification_days:
+                        # Only send if notification hasn't been sent already
+                        if not self.has_notification_been_sent(username, key_signature, 'warning'):
+                            self.send_key_expiration_warning(username, key_signature, expiration_date, days_remaining)
+                            self.record_notification_sent(username, key_signature, 'warning')
+                            warning_count += 1
+            
+            if warning_count > 0 or expired_count > 0:
+                self.logger.info(f"Sent {warning_count} expiration warnings and {expired_count} expiration notifications")
+            else:
+                self.logger.info("No new notifications needed")
+                
+        except sqlite3.Error as e:
+            self.logger.error(f"Database error checking for expiring keys: {e}")
+
+    def send_key_expiration_warning(self, username, key_signature, expiration_date, days_remaining):
+        """
+        Send a warning notification for a key that will expire soon.
+        
+        Args:
+            username: The username
+            key_signature: The SSH key signature
+            expiration_date: When the key will expire
+            days_remaining: Number of days until expiration
+        """
+        subject = f"SSH Key Expiration Warning for {username}"
+        
+        # Format the date for display
+        expiration_date_str = expiration_date.strftime("%Y-%m-%d")
+        
+        # Load and format template
+        template = self.load_email_template('warning')
+        message = template.format(
+            username=username,
+            key_signature=key_signature,
+            expiration_date=expiration_date_str,
+            days_remaining=days_remaining
+        )
+        
+        # Try to get the user's email if available
+        user_email = self.get_user_email(username)
+        
+        # Send to the user if we have their email
+        if user_email:
+            self.send_email(subject, message, user_email)
+        
+        # Also send to the admin email if notify_admin is enabled
+        if self.notify_admin:
+            admin_email = self.config.get('email', 'to_address', fallback=None)
+            if admin_email:
+                self.send_email(subject, message, admin_email)
+
+    def send_key_expired_notification(self, username, key_signature, expiration_date, days_expired):
+        """
+        Send a notification for a key that has expired.
+        
+        Args:
+            username: The username
+            key_signature: The SSH key signature
+            expiration_date: When the key expired
+            days_expired: Number of days since expiration
+        """
+        subject = f"SSH Key Expired for {username}"
+        
+        # Format the date for display
+        expiration_date_str = expiration_date.strftime("%Y-%m-%d")
+        
+        # Load and format template
+        template = self.load_email_template('expired')
+        message = template.format(
+            username=username,
+            key_signature=key_signature,
+            expiration_date=expiration_date_str,
+            days_expired=days_expired
+        )
+        
+        # Try to get the user's email if available
+        user_email = self.get_user_email(username)
+        
+        # Send to the user if we have their email
+        if user_email:
+            self.send_email(subject, message, user_email)
+        
+        # Also send to the admin email if notify_admin is enabled
+        if self.notify_admin:
+            admin_email = self.config.get('email', 'to_address', fallback=None)
+            if admin_email:
+                self.send_email(subject, message, admin_email)
+
+    def get_user_email(self, username):
+        """
+        Try to determine the email address for a user.
+        
+        Args:
+            username: The username to look up
+            
+        Returns:
+            Email address if found, None otherwise
+        """
+        # Check if we have a mapping in the config
+        if self.config.has_section('user_emails'):
+            if self.config.has_option('user_emails', username):
+                return self.config.get('user_emails', username)
+        
+        # If no specific mapping, use username@fredhutch.org by default
+        # or use the configured default domain if available
+        default_domain = self.config.get('email', 'default_domain', fallback='fredhutch.org')
+        return f"{username}@{default_domain}"
+
     def run(self) -> None:
         """Run the main program logic."""
         violations = self.check_all_users()
+        
+        if self.enable_email_notifications:
+            self.check_for_expiring_keys()
         
         if violations:
             self.logger.warning(f"Found {len(violations)} key violations")

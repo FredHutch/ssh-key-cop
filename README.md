@@ -33,7 +33,7 @@ SSH Key Cop checks user's authorized_keys files to enforce key rotation policies
 
 ```bash
 sudo mkdir -p /opt/ssh-key-cop
-sudo git clone https://github.com/robert-mcdermott/ssh-key-cop.git /opt/ssh-key-cop
+sudo git clone https://github.com/fredhutch/ssh-key-cop.git /opt/ssh-key-cop
 cd /opt/ssh-key-cop
 ```
 

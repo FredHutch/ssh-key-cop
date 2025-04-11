@@ -23,6 +23,9 @@ notification_days_before = 7
 # Path to email template file
 template_path = email_template.txt
 
+# Whether to send copies of all notifications to the admin email address (to_address)
+notify_admin = true
+
 # Email configuration
 to_address = rmcdermo@fredhutch.org
 from_address = ssh-key-cop@fredhutch.org

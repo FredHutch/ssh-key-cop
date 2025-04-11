@@ -50,6 +50,7 @@ class SSHKeyCop:
         if self.enable_email_notifications:
             self.notification_days = self.config.getint('email', 'notification_days_before', fallback=7)
             self.email_template_path = self.config.get('email', 'template_path', fallback='email_template.txt')
+            self.notify_admin = self.config.getboolean('email', 'notify_admin', fallback=True)
         
         self.dry_run = dry_run
         self.conn = None
@@ -62,6 +63,7 @@ class SSHKeyCop:
         # Now log email notification settings after logger is set up
         if self.enable_email_notifications:
             self.logger.info(f"Email notifications enabled: warning at {self.notification_days} days before expiration")
+            self.logger.info(f"Admin notifications: {self.notify_admin}")
         
         self.setup_database()
 
@@ -690,14 +692,15 @@ class SSHKeyCop:
         # Try to get the user's email if available
         user_email = self.get_user_email(username)
         
-        # Send to the user if we have their email, and to the admin
+        # Send to the user if we have their email
         if user_email:
             self.send_email(subject, message, user_email)
         
-        # Also send to the admin email
-        admin_email = self.config.get('email', 'to_address', fallback=None)
-        if admin_email:
-            self.send_email(subject, message, admin_email)
+        # Also send to the admin email if notify_admin is enabled
+        if self.notify_admin:
+            admin_email = self.config.get('email', 'to_address', fallback=None)
+            if admin_email:
+                self.send_email(subject, message, admin_email)
 
     def send_key_expired_notification(self, username, key_signature, expiration_date, days_expired):
         """
@@ -726,14 +729,15 @@ class SSHKeyCop:
         # Try to get the user's email if available
         user_email = self.get_user_email(username)
         
-        # Send to the user if we have their email, and to the admin
+        # Send to the user if we have their email
         if user_email:
             self.send_email(subject, message, user_email)
         
-        # Also send to the admin email
-        admin_email = self.config.get('email', 'to_address', fallback=None)
-        if admin_email:
-            self.send_email(subject, message, admin_email)
+        # Also send to the admin email if notify_admin is enabled
+        if self.notify_admin:
+            admin_email = self.config.get('email', 'to_address', fallback=None)
+            if admin_email:
+                self.send_email(subject, message, admin_email)
 
     def get_user_email(self, username):
         """

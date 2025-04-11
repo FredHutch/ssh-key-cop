@@ -83,7 +83,8 @@ Your key expired on {expiration_date} ({days_expired} days ago).
             'from_address': 'ssh-key-cop@example.com',
             'smtp_server': 'localhost',  # Using localhost to avoid actual email sending
             'smtp_port': '25',
-            'use_tls': 'false'
+            'use_tls': 'false',
+            'notify_admin': 'true'
         }
         
         # Add user email mappings
